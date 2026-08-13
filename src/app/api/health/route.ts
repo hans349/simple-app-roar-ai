@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { connectionEnvName, query, usingSsl } from "@/lib/db";
+import { connectionAttempts, connectionEnvName, connectionPort, query, usingSsl } from "@/lib/db";
 import { describeEmailEnv, detectTransport, fromAddress } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
@@ -15,17 +15,25 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   // Goes through the normal query path, so this also proves the schema
   // bootstrap succeeded rather than just that a socket opened.
-  let database: { ok: boolean; foundAs?: string; ssl?: boolean | null; error?: string };
+  let ok = false;
+  let error: string | undefined;
   try {
     await query("select 1");
-    database = { ok: true, foundAs: connectionEnvName(), ssl: usingSsl() };
+    ok = true;
   } catch (err) {
-    database = {
-      ok: false,
-      foundAs: connectionEnvName(),
-      error: err instanceof Error ? err.message : String(err),
-    };
+    error = err instanceof Error ? err.message : String(err);
   }
+
+  const database = {
+    ok,
+    foundAs: connectionEnvName(),
+    port: connectionPort(),
+    ssl: usingSsl(),
+    // Per-attempt timings separate "refused instantly" from "hung until the
+    // timeout" — different problems with the same final message.
+    attempts: connectionAttempts(),
+    ...(error ? { error } : {}),
+  };
 
   const transport = detectTransport();
   const { found, otherCandidates } = describeEmailEnv();

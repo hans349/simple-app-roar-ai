@@ -27,6 +27,9 @@ function connectionString(): string {
   return process.env[name]!;
 }
 
+// Two attempts have to fit inside one HTTP request, so keep each one short.
+const CONNECT_TIMEOUT_MS = 8_000;
+
 /** A managed database that terminates TLS rarely presents a cert we can chain. */
 function createPool(url: string, useSsl: boolean): Pool {
   return new Pool({
@@ -34,13 +37,26 @@ function createPool(url: string, useSsl: boolean): Pool {
     ssl: useSsl ? { rejectUnauthorized: false } : false,
     max: 5,
     idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
+    connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
   });
 }
 
-function isSslUnsupported(err: unknown): boolean {
+/**
+ * Should we retry this failure with the opposite TLS setting?
+ *
+ * A server that speaks no TLS usually says so. But one sitting behind a proxy
+ * that swallows the SSLRequest instead just never answers, so a timeout has to
+ * count as "maybe TLS is the problem" too. Auth and DNS errors are excluded —
+ * retrying those only produces a second, less informative error.
+ */
+function isWorthRetryingWithoutSsl(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return /does not support SSL|SSL.*not enabled|server does not support/i.test(message);
+  if (/password|authentication|role .* does not exist|ENOTFOUND|EAI_AGAIN/i.test(message)) {
+    return false;
+  }
+  return /does not support SSL|SSL.*not enabled|server does not support|timeout|ECONNRESET|EPROTO/i.test(
+    message,
+  );
 }
 
 declare global {
@@ -61,28 +77,61 @@ declare global {
  */
 let negotiatedSsl: boolean | null = null;
 
+export type ConnectAttempt = { ssl: boolean; ok: boolean; ms: number; error?: string };
+let lastAttempts: ConnectAttempt[] = [];
+
 /** Whether the live connection ended up using TLS. Null until connected. */
 export function usingSsl(): boolean | null {
   return negotiatedSsl;
 }
 
+/**
+ * What each connection attempt did. Error text only — no host, no credentials —
+ * so this is safe to expose on the public health endpoint.
+ */
+export function connectionAttempts(): ConnectAttempt[] {
+  return lastAttempts;
+}
+
+/** Port only, to distinguish "pointed at the wrong thing" from "unreachable". */
+export function connectionPort(): string | null {
+  try {
+    return new URL(connectionString()).port || "5432 (default)";
+  } catch {
+    return null;
+  }
+}
+
 async function connect(): Promise<Pool> {
   const url = connectionString();
   const attempts = /sslmode=(disable|allow)/.test(url) ? [false] : [true, false];
+  const log: ConnectAttempt[] = [];
 
   let lastError: unknown;
   for (const useSsl of attempts) {
     const pool = createPool(url, useSsl);
+    const startedAt = performance.now();
     try {
       await pool.query("select 1");
+      log.push({ ssl: useSsl, ok: true, ms: Math.round(performance.now() - startedAt) });
+      lastAttempts = log;
       negotiatedSsl = useSsl;
       return pool;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.push({
+        ssl: useSsl,
+        ok: false,
+        ms: Math.round(performance.now() - startedAt),
+        error: message,
+      });
       lastError = err;
       await pool.end().catch(() => undefined);
-      if (!isSslUnsupported(err)) throw err;
+      if (!isWorthRetryingWithoutSsl(err)) break;
     }
   }
+
+  lastAttempts = log;
   throw lastError;
 }
 
@@ -98,9 +147,12 @@ function getPool(): Promise<Pool> {
   return global.__pgPool;
 }
 
-const SCHEMA_SQL = `
-create extension if not exists pgcrypto;
+// Best-effort: gen_random_uuid() is built in from Postgres 13, so this only
+// matters on older servers — and creating extensions often needs rights a
+// managed database will not grant. Never let it fail the bootstrap.
+const EXTENSION_SQL = `create extension if not exists pgcrypto;`;
 
+const SCHEMA_SQL = `
 create table if not exists app_users (
   id            uuid primary key default gen_random_uuid(),
   email         text unique not null,
@@ -151,8 +203,10 @@ create index if not exists sessions_expires_idx on sessions (expires_at);
 export function ensureSchema(): Promise<void> {
   if (!global.__schemaReady) {
     global.__schemaReady = getPool()
-      .then((pool) => pool.query(SCHEMA_SQL))
-      .then(() => undefined)
+      .then(async (pool) => {
+        await pool.query(EXTENSION_SQL).catch(() => undefined);
+        await pool.query(SCHEMA_SQL);
+      })
       .catch((err) => {
         global.__schemaReady = undefined;
         throw err;
