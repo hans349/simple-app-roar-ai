@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { query } from "@/lib/db";
+import { connectionEnvName, query, usingSsl } from "@/lib/db";
 import { describeEmailEnv, detectTransport, fromAddress } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
@@ -13,17 +13,18 @@ export const dynamic = "force-dynamic";
  * you find out what they actually are.
  */
 export async function GET() {
-  let database: { ok: boolean; foundAs?: string; error?: string };
+  // Goes through the normal query path, so this also proves the schema
+  // bootstrap succeeded rather than just that a socket opened.
+  let database: { ok: boolean; foundAs?: string; ssl?: boolean | null; error?: string };
   try {
     await query("select 1");
-    database = {
-      ok: true,
-      foundAs: ["DATABASE_URL", "POSTGRES_URL", "PG_CONNECTION_STRING", "POSTGRESQL_URL"].find(
-        (name) => process.env[name],
-      ),
-    };
+    database = { ok: true, foundAs: connectionEnvName(), ssl: usingSsl() };
   } catch (err) {
-    database = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    database = {
+      ok: false,
+      foundAs: connectionEnvName(),
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 
   const transport = detectTransport();
