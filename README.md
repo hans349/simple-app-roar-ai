@@ -31,18 +31,28 @@ npm run dev                  # http://localhost:3000
 
 ### Environment variables
 
-**Database** — one Postgres connection string, under any of `DATABASE_URL`,
-`POSTGRES_URL`, `PG_CONNECTION_STRING` or `POSTGRESQL_URL`.
+**Database** — one Postgres connection string. Roar injects `DATABASE_URL`; the
+app also accepts `POSTGRES_URL`, `PG_CONNECTION_STRING` and `POSTGRESQL_URL`.
 
-**Email** — whichever of these is configured wins, checked in this order:
+**Email** — Roar's docs say credentials arrive as *"standard SMTP-style
+variables"* but do not name them, so the app accepts every common spelling and
+uses the first transport it finds:
 
-1. `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`
-2. `RESEND_API_KEY`
+1. A connection URL — `SMTP_URL`, `MAIL_URL`, `EMAIL_SERVER` or `EMAIL_URL`
+2. Discrete SMTP variables — `SMTP_*`, `MAIL_*`, `EMAIL_SERVER_*` or `MAILER_*`
+   (host, port, user, password)
+3. `RESEND_API_KEY`, for running the same tests off-platform
 
-`EMAIL_FROM` sets the from address. On the platform this is injected for you
-(`noreply@appemailalerts.com`).
+`EMAIL_FROM` sets the from address (`noreply@appemailalerts.com` on Roar);
+`SMTP_FROM`, `MAIL_FROM` and `EMAIL_SERVER_FROM` also work.
 
-If neither transport is set the dashboard says so in a red banner rather than
+**Don't guess — ask the app.** `GET /api/health` reports which variable *names*
+it matched, plus any other mail-shaped variables it noticed. If Roar uses a
+naming scheme not listed above, it will show up under
+`otherMailVariablesPresent`, and adding it means one line in `ENV_ALIASES` in
+[src/lib/email.ts](src/lib/email.ts).
+
+If no transport is found the dashboard says so in a red banner rather than
 failing silently at send time.
 
 ### Database schema
@@ -68,12 +78,21 @@ curl -s https://<your-app>/api/health | jq
 {
   "app": "simple-app-roar-ai",
   "environment": "production",
-  "database": { "ok": true },
-  "email": { "transport": "smtp", "from": "noreply@appemailalerts.com", "configured": true }
+  "node": "v22.x.x",
+  "database": { "ok": true, "foundAs": "DATABASE_URL" },
+  "email": {
+    "configured": true,
+    "transport": "smtp",
+    "from": "noreply@appemailalerts.com",
+    "variables": { "host": "SMTP_HOST", "user": "SMTP_USER", "pass": "SMTP_PASSWORD" },
+    "otherMailVariablesPresent": []
+  },
+  "aiGateway": { "keyPresent": true, "baseUrl": "https://cloud.roar-ai.com/v1" }
 }
 ```
 
 It returns `503` if either side is not ready, so it works as a deploy smoke test.
+It reports variable **names only** — never a connection string, password or key.
 
 The three test endpoints require a session cookie:
 
@@ -109,11 +128,22 @@ npm test
 Covers the backend logic that is worth covering — password hashing, input
 validation, and HTML escaping in the email templates. No UI tests.
 
-## Deploying
+## Deploying to Roar
 
-The platform builds from this repo. `next.config.ts` sets `output: "standalone"`,
-which is harmless if the host runs `next start` and necessary if it runs a bare
-container.
+Console → **My applications → New application**, connect GitHub, pick this repo,
+and turn on both the database and email toggles. Every push to the connected
+branch redeploys automatically.
+
+`next.config.ts` sets `output: "standalone"`, which is harmless if the host runs
+`next start` and necessary if it runs a bare container.
 
 After a deploy, hit `/api/health` first. If it is green, register an account and
 work through the three tests in order.
+
+Two Roar behaviours worth knowing while testing:
+
+- **Apps sleep when idle** and wake on the next request, so the first hit after
+  a quiet period will be slow. That is a cold start, not a failure.
+- Roar also injects `ROAR_API_KEY` and `ROAR_BASE_URL`, an OpenAI-compatible AI
+  gateway billed to your account with per-app attribution. This app does not use
+  it; `/api/health` just reports whether it is present.

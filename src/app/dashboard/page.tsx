@@ -82,8 +82,11 @@ export default async function DashboardPage() {
         </div>
         {!transport && (
           <p className="mt-2 text-xs text-red-700">
-            Set <code className="font-mono">SMTP_HOST</code> (plus port, user, password) or{" "}
-            <code className="font-mono">RESEND_API_KEY</code>. All three tests will fail until then.
+            All three tests will fail until email credentials are present. Open{" "}
+            <a href="/api/health" className="underline">
+              /api/health
+            </a>{" "}
+            to see which variables the platform actually injected.
           </p>
         )}
       </div>

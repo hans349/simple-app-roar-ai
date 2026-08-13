@@ -13,41 +13,106 @@ export type SendEmailResult = {
 };
 
 /**
- * The `from` address. The platform injects EMAIL_FROM; the rest are fallbacks
- * for local development.
+ * Roar's docs say email credentials arrive as "standard SMTP-style variables"
+ * without naming them, so accept every common spelling rather than betting on
+ * one. `describeEmailEnv()` reports which names were actually found, which is
+ * how you confirm the real ones after a deploy.
  */
-export function fromAddress(): string {
-  return (
-    process.env.EMAIL_FROM ??
-    process.env.SMTP_FROM ??
-    process.env.MAIL_FROM ??
-    "onboarding@resend.dev"
-  );
+const ENV_ALIASES = {
+  url: ["SMTP_URL", "MAIL_URL", "EMAIL_SERVER", "EMAIL_URL"],
+  host: ["SMTP_HOST", "MAIL_HOST", "EMAIL_SERVER_HOST", "MAILER_HOST", "SMTP_SERVER"],
+  port: ["SMTP_PORT", "MAIL_PORT", "EMAIL_SERVER_PORT", "MAILER_PORT"],
+  user: [
+    "SMTP_USER",
+    "SMTP_USERNAME",
+    "SMTP_LOGIN",
+    "MAIL_USER",
+    "MAIL_USERNAME",
+    "EMAIL_SERVER_USER",
+    "MAILER_USER",
+  ],
+  pass: [
+    "SMTP_PASSWORD",
+    "SMTP_PASS",
+    "MAIL_PASSWORD",
+    "MAIL_PASS",
+    "EMAIL_SERVER_PASSWORD",
+    "MAILER_PASSWORD",
+  ],
+  from: ["EMAIL_FROM", "SMTP_FROM", "MAIL_FROM", "EMAIL_SERVER_FROM"],
+} as const;
+
+/** First alias that is set, with the name it was found under. */
+function lookup(names: readonly string[]): { name: string; value: string } | null {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value && value.trim() !== "") return { name, value: value.trim() };
+  }
+  return null;
 }
 
+export function fromAddress(): string {
+  return lookup(ENV_ALIASES.from)?.value ?? "onboarding@resend.dev";
+}
+
+export type TransportKind = "smtp-url" | "smtp" | "resend" | null;
+
 /**
- * Which transport is configured, if any. Exposed so the UI can tell you what
- * it is about to use before you click send — the whole point of this harness.
+ * Which transport is configured, if any. Exposed so the dashboard can say what
+ * it is about to use before you click send.
  */
-export function detectTransport(): "smtp" | "resend" | null {
-  if (process.env.SMTP_HOST) return "smtp";
+export function detectTransport(): TransportKind {
+  if (lookup(ENV_ALIASES.url)) return "smtp-url";
+  if (lookup(ENV_ALIASES.host)) return "smtp";
   if (process.env.RESEND_API_KEY) return "resend";
   return null;
 }
 
-async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
-  const port = Number(process.env.SMTP_PORT ?? 587);
-  const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
+/**
+ * Which variable names were found — names only, never values.
+ *
+ * This is the diagnostic that matters on an undocumented host: deploy, hit
+ * /api/health, and read back exactly what the platform injected.
+ */
+export function describeEmailEnv() {
+  const found: Record<string, string> = {};
+  for (const [role, names] of Object.entries(ENV_ALIASES)) {
+    const hit = lookup(names);
+    if (hit) found[role] = hit.name;
+  }
+  if (process.env.RESEND_API_KEY) found.resend = "RESEND_API_KEY";
+
+  // Anything else that looks mail-related, so an unexpected naming scheme is
+  // still visible rather than silently ignored.
+  const known = new Set(Object.values(ENV_ALIASES).flat() as string[]);
+  const otherCandidates = Object.keys(process.env)
+    .filter((k) => /(^|_)(SMTP|MAIL|EMAIL|SENDGRID|POSTMARK|RESEND|SES)/i.test(k))
+    .filter((k) => !known.has(k))
+    .sort();
+
+  return { found, otherCandidates };
+}
+
+function buildTransporter() {
+  const url = lookup(ENV_ALIASES.url);
+  if (url) return nodemailer.createTransport(url.value);
+
+  const host = lookup(ENV_ALIASES.host);
+  const port = Number(lookup(ENV_ALIASES.port)?.value ?? 587);
+  const user = lookup(ENV_ALIASES.user);
+  const pass = lookup(ENV_ALIASES.pass);
+
+  return nodemailer.createTransport({
+    host: host?.value,
     port,
     // 465 is implicit TLS; everything else upgrades via STARTTLS.
     secure: port === 465,
-    auth: process.env.SMTP_USER
-      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD ?? process.env.SMTP_PASS }
-      : undefined,
+    auth: user && pass ? { user: user.value, pass: pass.value } : undefined,
   });
+}
 
-  const info = await transporter.sendMail({
+async function sendViaSmtp(input: SendEmailInput, kind: string): Promise<SendEmailResult> {
+  const info = await buildTransporter().sendMail({
     from: fromAddress(),
     to: input.to,
     subject: input.subject,
@@ -55,7 +120,7 @@ async function sendViaSmtp(input: SendEmailInput): Promise<SendEmailResult> {
     html: input.html,
   });
 
-  return { messageId: info.messageId ?? null, transport: "smtp" };
+  return { messageId: info.messageId ?? null, transport: kind };
 }
 
 async function sendViaResend(input: SendEmailInput): Promise<SendEmailResult> {
@@ -74,34 +139,23 @@ async function sendViaResend(input: SendEmailInput): Promise<SendEmailResult> {
     }),
   });
 
-  const body = (await response.json().catch(() => ({}))) as {
-    id?: string;
-    message?: string;
-    name?: string;
-  };
-
-  if (!response.ok) {
-    throw new Error(body.message ?? `Resend returned ${response.status}`);
-  }
+  const body = (await response.json().catch(() => ({}))) as { id?: string; message?: string };
+  if (!response.ok) throw new Error(body.message ?? `Resend returned ${response.status}`);
 
   return { messageId: body.id ?? null, transport: "resend" };
 }
 
-/**
- * Send one email through whichever transport the environment provides.
- *
- * Add a branch here when the platform's own email service is documented — that
- * is the only place that needs to change.
- */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
-  switch (detectTransport()) {
+  const kind = detectTransport();
+  switch (kind) {
+    case "smtp-url":
     case "smtp":
-      return sendViaSmtp(input);
+      return sendViaSmtp(input, kind);
     case "resend":
       return sendViaResend(input);
     default:
       throw new Error(
-        "No email transport configured. Set SMTP_HOST (plus SMTP_PORT/SMTP_USER/SMTP_PASSWORD) or RESEND_API_KEY.",
+        "No email transport configured. Expected SMTP-style variables (SMTP_HOST/SMTP_URL or a MAIL_*/EMAIL_SERVER_* equivalent) or RESEND_API_KEY. Check /api/health to see what the platform injected.",
       );
   }
 }
