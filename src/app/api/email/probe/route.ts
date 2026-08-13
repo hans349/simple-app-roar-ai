@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
-import { parseEmail } from "@/lib/validation";
-import { staticEmail } from "@/lib/templates";
+import { parseEmail, parseText } from "@/lib/validation";
+import { customEmail, staticEmail } from "@/lib/templates";
 import { detectTransport, sendEmail } from "@/lib/email";
+import { isProbeAuthorized, probeEnabled } from "@/lib/probe";
 
 export const dynamic = "force-dynamic";
 
@@ -11,32 +11,16 @@ export const dynamic = "force-dynamic";
  *
  * The three real tests all sit behind a login, which needs Postgres — so a
  * broken database blocks testing email even though email is fine. This route
- * bypasses that: no session, no reads, no writes.
+ * bypasses that: no session, no reads, no writes, no logging.
  *
- * It is disabled unless PROBE_TOKEN is set, and returns 404 when absent so an
+ * Disabled unless PROBE_TOKEN is set, returning 404 when absent so an
  * unconfigured deploy exposes nothing that could be used as an open relay.
  */
-function tokenMatches(provided: string | null): boolean {
-  const expected = process.env.PROBE_TOKEN;
-  if (!expected || !provided) return false;
-
-  // Hash first so differing lengths cannot throw, and compare in constant time.
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
-}
-
 export async function POST(request: Request) {
-  if (!process.env.PROBE_TOKEN) {
+  if (!probeEnabled()) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-
-  const provided =
-    request.headers.get("x-probe-token") ??
-    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    null;
-
-  if (!tokenMatches(provided)) {
+  if (!(await isProbeAuthorized(request))) {
     return NextResponse.json({ error: "Invalid probe token" }, { status: 401 });
   }
 
@@ -46,12 +30,27 @@ export async function POST(request: Request) {
   const to = parseEmail(payload.to, "recipient");
   if (!to.ok) return NextResponse.json({ error: to.error }, { status: 400 });
 
+  // Subject and body are optional: with them this mirrors test 1, without them
+  // it mirrors test 2.
+  let email: { subject: string; text: string; html: string };
+  if (payload.subject !== undefined || payload.body !== undefined) {
+    const subject = parseText(payload.subject, "subject", { max: 200 });
+    if (!subject.ok) return NextResponse.json({ error: subject.error }, { status: 400 });
+
+    const body = parseText(payload.body, "body", { max: 5000 });
+    if (!body.ok) return NextResponse.json({ error: body.error }, { status: 400 });
+
+    email = customEmail(subject.value, body.value);
+  } else {
+    email = staticEmail();
+  }
+
   try {
-    const email = staticEmail();
     const result = await sendEmail({ to: to.value, ...email });
     return NextResponse.json({
       ok: true,
       to: to.value,
+      subject: email.subject,
       transport: result.transport,
       messageId: result.messageId,
       note: "Sent without any database access.",

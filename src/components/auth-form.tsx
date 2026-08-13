@@ -7,6 +7,8 @@ import type { FormState } from "@/app/actions";
 type Props = {
   mode: "login" | "register";
   action: (prev: FormState, formData: FormData) => Promise<FormState>;
+  /** Show the escape hatch to the database-free email tests. */
+  probeEnabled?: boolean;
 };
 
 const copy = {
@@ -26,9 +28,13 @@ const copy = {
   },
 } as const;
 
-export function AuthForm({ mode, action }: Props) {
+export function AuthForm({ mode, action, probeEnabled = false }: Props) {
   const [state, formAction, pending] = useActionState(action, { error: null });
   const t = copy[mode];
+
+  // A connection failure here means the database is down, not that the user
+  // typed something wrong — point them at the tests that still work.
+  const looksLikeDbFailure = /timeout|ECONN|connect|terminated|database/i.test(state.error ?? "");
 
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
@@ -71,9 +77,23 @@ export function AuthForm({ mode, action }: Props) {
           </div>
 
           {state.error && (
-            <p role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
-              {state.error}
-            </p>
+            <div role="alert" className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+              <p>{state.error}</p>
+              {looksLikeDbFailure && (
+                <p className="mt-1 text-xs">
+                  This looks like the database, not your details.{" "}
+                  {probeEnabled ? (
+                    <Link href="/probe" className="font-medium underline">
+                      Test email without it
+                    </Link>
+                  ) : (
+                    <>
+                      Check <code className="font-mono">/api/health</code>.
+                    </>
+                  )}
+                </p>
+              )}
+            </div>
           )}
 
           <button

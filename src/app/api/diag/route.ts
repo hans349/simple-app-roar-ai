@@ -1,8 +1,8 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { connect } from "node:net";
 import { NextResponse } from "next/server";
 import { connectionEnvName } from "@/lib/db";
+import { isProbeAuthorized, probeEnabled } from "@/lib/probe";
 
 export const dynamic = "force-dynamic";
 
@@ -16,13 +16,6 @@ export const dynamic = "force-dynamic";
  *
  * Gated behind PROBE_TOKEN because it reveals internal hostnames and addresses.
  */
-function tokenMatches(provided: string | null): boolean {
-  const expected = process.env.PROBE_TOKEN;
-  if (!expected || !provided) return false;
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
-}
 
 /** Host and port only — never the user or password embedded in the URL. */
 function targetFromEnv(): { host: string; port: number } | null {
@@ -74,16 +67,10 @@ function tcpProbe(host: string, port: number, timeoutMs = 5_000) {
 }
 
 export async function GET(request: Request) {
-  if (!process.env.PROBE_TOKEN) {
+  if (!probeEnabled()) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-
-  const provided =
-    request.headers.get("x-probe-token") ??
-    request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ??
-    null;
-
-  if (!tokenMatches(provided)) {
+  if (!(await isProbeAuthorized(request))) {
     return NextResponse.json({ error: "Invalid probe token" }, { status: 401 });
   }
 

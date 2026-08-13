@@ -94,6 +94,23 @@ curl -s https://<your-app>/api/health | jq
 It returns `503` if either side is not ready, so it works as a deploy smoke test.
 It reports variable **names only** — never a connection string, password or key.
 
+## Testing email while the database is down
+
+`/dashboard` needs a session, a session needs Postgres, and Postgres may be the
+thing that is broken — which would leave the working half of the stack
+untestable. **`/probe`** is the same email tests with no database at all.
+
+Set `PROBE_TOKEN` in the environment to any random string, open `/probe`, enter
+it once (unlocks for 8 hours via an httpOnly cookie), and tests 1 and 2 work
+normally. Test 3 is shown but disabled, since it genuinely needs the database.
+The page also has a button that runs the network diagnosis below.
+
+Sends made here are **not** recorded in `email_logs` — writing a log row would
+need the database this page exists to work around.
+
+While `PROBE_TOKEN` is unset, `/probe`, `/api/email/probe` and `/api/diag` are
+all inert, so an unconfigured deploy cannot be used to send mail.
+
 ### Diagnosing a database that will not connect
 
 `/api/health` can only report that the Postgres client timed out — which looks
