@@ -1,5 +1,5 @@
 import { lookup } from "node:dns/promises";
-import { connect } from "node:net";
+import { connect, isIP } from "node:net";
 import { NextResponse } from "next/server";
 import { connectionEnvName } from "@/lib/db";
 import { isProbeAuthorized, probeEnabled } from "@/lib/probe";
@@ -48,7 +48,7 @@ async function resolveHost(host: string) {
 }
 
 /** Raw TCP reachability — no Postgres protocol involved. */
-function tcpProbe(host: string, port: number, timeoutMs = 5_000) {
+function tcpProbe(host: string, port: number, timeoutMs = 4_000) {
   return new Promise<{ ok: boolean; ms: number; error?: string }>((resolve) => {
     const startedAt = performance.now();
     const socket = connect({ host, port });
@@ -82,26 +82,64 @@ export async function GET(request: Request) {
     );
   }
 
-  const dns = await resolveHost(target.host);
-  const tcp = dns.ok ? await tcpProbe(target.host, target.port) : null;
+  const isLiteralIp = isIP(target.host) !== 0;
+  const dns = isLiteralIp
+    ? { ok: true, ms: 0, addresses: [target.host], note: "Literal IP — no DNS lookup performed." }
+    : await resolveHost(target.host);
+
+  // Postgres direct, in case only the pooler is unreachable; and a public host
+  // as a control, to tell "this container has no egress at all" apart from
+  // "this particular destination is unreachable".
+  const [tcp, direct, control] = await Promise.all([
+    tcpProbe(target.host, target.port),
+    target.port === 5432
+      ? Promise.resolve(null)
+      : tcpProbe(target.host, 5432).then((r) => ({ port: 5432, ...r })),
+    tcpProbe("1.1.1.1", 443).then((r) => ({ target: "1.1.1.1:443", ...r })),
+  ]);
 
   // Say plainly which layer failed, so the answer does not depend on reading
   // timings correctly.
   let verdict: string;
   if (!dns.ok) {
     verdict = "DNS failed — the database hostname does not resolve from this container.";
-  } else if (!tcp?.ok && /ECONNREFUSED/.test(tcp?.error ?? "")) {
-    verdict = `Host is reachable but nothing is listening on port ${target.port}.`;
-  } else if (!tcp?.ok) {
-    verdict = `DNS resolves but TCP to port ${target.port} never completes — packets are being dropped (firewall, security group or missing route), not refused.`;
-  } else {
+  } else if (tcp.ok) {
     verdict = `TCP to port ${target.port} succeeds, so the network path is fine. A Postgres-level timeout now points at the pooler or the database itself, not connectivity.`;
+  } else if (/ECONNREFUSED/.test(tcp.error ?? "")) {
+    verdict = `Host is reachable but nothing is listening on port ${target.port} — the service is down rather than blocked.`;
+  } else if (direct?.ok) {
+    verdict = `Port ${target.port} is blocked but Postgres on 5432 is reachable. Pointing DATABASE_URL at port 5432 would work around the pooler.`;
+  } else if (!control.ok) {
+    verdict =
+      "Neither the database nor a public address is reachable — this container appears to have no outbound network at all.";
+  } else {
+    verdict = `Public egress works but nothing on ${target.host} answers on any port tried. The container has no route onto that network — it is not attached to the overlay, or egress to that range is blocked. Packets are dropped, not refused, so the database itself may be healthy.`;
   }
 
   return NextResponse.json({
-    target: { host: target.host, port: target.port, foundAs: connectionEnvName() },
+    target: {
+      host: target.host,
+      port: target.port,
+      foundAs: connectionEnvName(),
+      // 100.64.0.0/10 is RFC 6598 shared address space, used by overlay
+      // networks (Tailscale, some CNIs) rather than ordinary private ranges.
+      addressRange: describeRange(target.host),
+    },
     dns,
     tcp,
+    postgresDirect: direct,
+    publicEgress: control,
     verdict,
   });
+}
+
+function describeRange(host: string): string | null {
+  if (isIP(host) !== 4) return null;
+  const [a, b] = host.split(".").map(Number);
+  if (a === 100 && b >= 64 && b <= 127) return "100.64.0.0/10 — RFC 6598 shared address space (CGNAT range, typical of overlay networks)";
+  if (a === 10) return "10.0.0.0/8 — RFC 1918 private";
+  if (a === 172 && b >= 16 && b <= 31) return "172.16.0.0/12 — RFC 1918 private";
+  if (a === 192 && b === 168) return "192.168.0.0/16 — RFC 1918 private";
+  if (a === 127) return "127.0.0.0/8 — loopback";
+  return "public";
 }
