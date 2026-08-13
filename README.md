@@ -6,6 +6,10 @@ then run three tests from one page.
 
 Use throwaway addresses and dummy data only. This is a harness, not a product.
 
+**Results so far are written up in [FINDINGS.md](FINDINGS.md)** — email works,
+the managed database is unreachable from app containers, and there are three
+smaller platform issues worth fixing.
+
 ## The three tests
 
 | # | Test | What it proves |
