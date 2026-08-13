@@ -94,6 +94,24 @@ curl -s https://<your-app>/api/health | jq
 It returns `503` if either side is not ready, so it works as a deploy smoke test.
 It reports variable **names only** — never a connection string, password or key.
 
+### Testing email without a database
+
+All three tests sit behind a login, which needs Postgres — so a broken database
+blocks testing email even though email itself is fine. `POST /api/email/probe`
+skips that: no session, no reads, no writes.
+
+It is **disabled unless `PROBE_TOKEN` is set** and returns `404` when absent, so
+an unconfigured deploy cannot be used as an open relay.
+
+```bash
+curl -sX POST https://<your-app>/api/email/probe \
+  -H "x-probe-token: $PROBE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"to":"you@example.com"}'
+```
+
+### Authenticated endpoints
+
 The three test endpoints require a session cookie:
 
 | Method | Path | Body |

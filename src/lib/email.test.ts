@@ -73,6 +73,13 @@ describe("describeEmailEnv", () => {
     expect(describeEmailEnv().otherCandidates).toContain("POSTMARK_SERVER_TOKEN");
   });
 
+  it("does not list an already-reported variable a second time", () => {
+    process.env.RESEND_API_KEY = "placeholder";
+    const { found, otherCandidates } = describeEmailEnv();
+    expect(found.resend).toBe("RESEND_API_KEY");
+    expect(otherCandidates).not.toContain("RESEND_API_KEY");
+  });
+
   it("ignores variables that are set but empty", () => {
     process.env.SMTP_HOST = "";
     expect(detectTransport()).toBeNull();

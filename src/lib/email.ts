@@ -83,8 +83,12 @@ export function describeEmailEnv() {
   if (process.env.RESEND_API_KEY) found.resend = "RESEND_API_KEY";
 
   // Anything else that looks mail-related, so an unexpected naming scheme is
-  // still visible rather than silently ignored.
-  const known = new Set(Object.values(ENV_ALIASES).flat() as string[]);
+  // still visible rather than silently ignored. Names already reported above
+  // are excluded, otherwise they show up twice and read like a second finding.
+  const known = new Set([
+    ...(Object.values(ENV_ALIASES).flat() as string[]),
+    ...Object.values(found),
+  ]);
   const otherCandidates = Object.keys(process.env)
     .filter((k) => /(^|_)(SMTP|MAIL|EMAIL|SENDGRID|POSTMARK|RESEND|SES)/i.test(k))
     .filter((k) => !known.has(k))
