@@ -94,6 +94,21 @@ curl -s https://<your-app>/api/health | jq
 It returns `503` if either side is not ready, so it works as a deploy smoke test.
 It reports variable **names only** — never a connection string, password or key.
 
+### Diagnosing a database that will not connect
+
+`/api/health` can only report that the Postgres client timed out — which looks
+identical whether DNS is broken, the route is dropped, the port is closed, or a
+pooler accepts TCP and never speaks. `GET /api/diag` separates them by running
+DNS resolution and a raw TCP connect from inside the app container, and returns
+a plain-language verdict.
+
+Gated behind `PROBE_TOKEN` because it reveals internal hostnames and addresses.
+Never returns the user or password from the connection string.
+
+```bash
+curl -s https://<your-app>/api/diag -H "x-probe-token: $PROBE_TOKEN"
+```
+
 ### Testing email without a database
 
 All three tests sit behind a login, which needs Postgres — so a broken database
