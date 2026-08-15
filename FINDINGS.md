@@ -44,6 +44,17 @@ Postgres-level attempts, both with and without TLS, time out identically:
 ]
 ```
 
+A later attempt returned a different and more explicit error:
+
+```
+connect EHOSTUNREACH 100.64.0.2:6432
+```
+
+`EHOSTUNREACH` is not a timeout. The network stack rejects the connection
+immediately — either the local routing table has no entry matching the
+destination, or a router replied ICMP host-unreachable. Both observations
+describe the same fault; this one states it outright.
+
 ### What this rules out
 
 - **Not TLS.** Plaintext and TLS fail identically, so it is not a certificate
@@ -51,9 +62,11 @@ Postgres-level attempts, both with and without TLS, time out identically:
 - **Not credentials.** Authentication is never reached; the TCP handshake does
   not complete.
 - **Not DNS.** The host is a literal IP, so no name resolution is involved.
-- **Not a dead service.** Connections are **dropped, not refused**. A closed
-  port returns `ECONNREFUSED` in under 100 ms. A full 4–5 second silence means
-  packets are discarded with no response, so PgBouncer may well be healthy.
+- **Not a firewall.** A firewall that drops is silent (the original timeout); one
+  that rejects returns `ECONNREFUSED`. `EHOSTUNREACH` is neither — it is the
+  absence of a route.
+- **Not a dead service.** Nothing ever reaches the pooler, so PgBouncer may well
+  be healthy. Its state is untestable from here.
 
 ### Most likely cause
 
@@ -66,16 +79,49 @@ Combined with the drop-not-refuse signature, this points to **the app container
 having no route onto the network the database lives on**, rather than a firewall
 rule blocking one port on an otherwise reachable host.
 
-Worth checking, in order:
+### Railway-specific leads
 
-1. Whether app containers are attached to the same overlay network as the
-   database at all — and if the overlay needs a client or sidecar, whether it is
-   running and authorized in the app container.
-2. Whether the app container's route table covers `100.64.0.0/10`. If nothing
-   matches, traffic goes to the default gateway and disappears — producing
-   exactly these silent timeouts.
-3. Whether the database provisioned into a different network or region than the
-   app runtime. Common when the two are provisioned by separate services.
+The platform runs on Railway, whose private networking has properties that fit
+these symptoms closely. Worth checking in this order:
+
+1. **Are the app service and the Postgres service in the same Railway project
+   *and* environment?** Railway's private network only spans a single
+   project+environment pair. A service outside it has no route to the database
+   at all — which is precisely `EHOSTUNREACH`. If Roar provisions customer apps
+   and their databases into separate projects, no per-app configuration can fix
+   this; the topology has to change.
+
+2. **Is the app receiving the private `DATABASE_URL` where it needs the public
+   one?** Railway Postgres exposes both a private endpoint and a
+   `DATABASE_PUBLIC_URL` TCP proxy reachable from anywhere. If apps run outside
+   the database's project, the public URL is the working option and the private
+   one cannot be made to work.
+
+3. **Railway's private network is IPv6.** Services address each other as
+   `*.railway.internal`, resolving to IPv6. The injected value here is an IPv4
+   CGNAT address, so something is proxying or translating between the two — and
+   that layer is a candidate for the fault.
+
+4. **Railway's private network is not up at the instant a container starts.**
+   There is a short delay before it becomes usable, so anything connecting
+   immediately on boot can fail. This would produce intermittent rather than
+   persistent failures, so it does not explain what is seen here, but it is
+   worth knowing for apps that connect eagerly at startup.
+
+---
+
+### What to ask the platform team
+
+1. Are deployed apps and their managed Postgres in the same Railway project and
+   environment? If not, private networking cannot reach across, and the fix is
+   topological rather than per-app.
+2. Can apps be given `DATABASE_PUBLIC_URL` instead — or as well — so there is a
+   working path today?
+3. Is there any supported way to reach a managed database directly for
+   verification: a SQL console, `psql` access, or a port-forward? Currently
+   there is no way to confirm the database is even running.
+4. What is the intended migration path (see F4)? Related, since both need some
+   route to the database.
 
 ---
 
