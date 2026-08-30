@@ -60,11 +60,3 @@ export function parseQuantity(value: unknown): ValidationResult<number> {
   }
   return { ok: true, value: n };
 }
-
-// ---------------------------------------------------------------------------
-// QA bb6d3cc1 — DELIBERATE BUILD BREAK. Not real code. Revert this commit.
-// Verifies that a failed deploy reports "failed" rather than "crashed" while
-// the previously deployed version keeps serving.
-// ---------------------------------------------------------------------------
-export function qaBreak( {
-  this is not valid typescript and must fail the build
