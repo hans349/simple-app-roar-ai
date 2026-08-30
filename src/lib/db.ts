@@ -234,6 +234,29 @@ create table if not exists notes (
   body text
 );
 alter table notes add column if not exists "at" timestamptz default now();
+
+-- Seed rows, so the editor has something to act on.
+--
+-- Deliberately overlapping on each half of the composite key: two rows share
+-- order_id 1001, and two share sku WIDGET-A. An editor that addresses rows by
+-- only one key column therefore updates the wrong row visibly, instead of
+-- appearing to work because every value happened to be unique.
+insert into order_items (order_id, sku, qty) values
+  (1001, 'WIDGET-A', 3),
+  (1001, 'WIDGET-B', 1),
+  (1002, 'WIDGET-A', 7)
+on conflict do nothing;
+
+insert into order_items_legacy (sku, label) values
+  ('WIDGET-A', 'Widget, type A'),
+  ('WIDGET-B', 'Widget, type B')
+on conflict do nothing;
+
+-- No key to conflict on, so guard on emptiness to stay idempotent.
+insert into notes (body)
+select 'First note — this table has no primary key.'
+ where not exists (select 1 from notes);
+
 `;
 
 /**
