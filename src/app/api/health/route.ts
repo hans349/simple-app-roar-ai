@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectionAttempts, connectionEnvName, connectionPort, query, usingSsl } from "@/lib/db";
+import { tableShapes } from "@/lib/schema-info";
 import { describeEmailEnv, detectTransport, fromAddress } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
@@ -35,6 +36,12 @@ export async function GET() {
     ...(error ? { error } : {}),
   };
 
+  // Ground truth for what Postgres actually holds, so a console rendering can
+  // be checked against the real constraint rather than taken on trust. Also
+  // doubles as proof that the current build deployed: a table appears here
+  // only once this code has run.
+  const tables = ok ? await tableShapes().catch(() => null) : null;
+
   const transport = detectTransport();
   const { found, otherCandidates } = describeEmailEnv();
 
@@ -44,6 +51,7 @@ export async function GET() {
     url: process.env.APP_PUBLIC_URL ?? process.env.APP_URL ?? null,
     node: process.version,
     database,
+    tables,
     email: {
       configured: transport !== null,
       transport,
