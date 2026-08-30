@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { connectionAttempts, connectionEnvName, connectionPort, query, usingSsl } from "@/lib/db";
-import { tableShapes } from "@/lib/schema-info";
+import { fixtureRows, tableShapes } from "@/lib/schema-info";
 import { describeEmailEnv, detectTransport, fromAddress } from "@/lib/email";
 
 export const dynamic = "force-dynamic";
@@ -41,6 +41,7 @@ export async function GET() {
   // doubles as proof that the current build deployed: a table appears here
   // only once this code has run.
   const tables = ok ? await tableShapes().catch(() => null) : null;
+  const fixtures = ok ? await fixtureRows().catch(() => null) : null;
 
   const transport = detectTransport();
   const { found, otherCandidates } = describeEmailEnv();
@@ -52,6 +53,7 @@ export async function GET() {
     node: process.version,
     database,
     tables,
+    fixtures,
     email: {
       configured: transport !== null,
       transport,
