@@ -14,6 +14,10 @@ export type TableShape = {
  * order rather than key order addresses rows wrongly on a composite key, and
  * the two only differ if a table is deliberately built that way.
  *
+ * Cast to text[] because array_agg over attname yields name[], for which
+ * node-postgres has no parser — it would hand back the raw Postgres array
+ * literal as a string instead of an array.
+ *
  * Names only — no row data is read.
  */
 export async function tableShapes(): Promise<TableShape[]> {
@@ -22,7 +26,7 @@ export async function tableShapes(): Promise<TableShape[]> {
             (select array_agg(a.attname order by k.ord)
                from unnest(i.indkey) with ordinality k(attnum, ord)
                join pg_attribute a
-                 on a.attrelid = c.oid and a.attnum = k.attnum) as pk
+                 on a.attrelid = c.oid and a.attnum = k.attnum)::text[] as pk
        from pg_class c
        left join pg_index i on i.indrelid = c.oid and i.indisprimary
       where c.relkind = 'r'
