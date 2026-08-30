@@ -192,18 +192,48 @@ create index if not exists items_user_created_idx on items (user_id, created_at 
 create index if not exists email_logs_user_created_idx on email_logs (user_id, created_at desc);
 create index if not exists sessions_expires_idx on sessions (expires_at);
 
--- QA fixtures for b205adf7 — exercise how the console handles primary keys.
--- Not used by the application. order_items is keyed on two columns; notes is
--- deliberately unkeyed, so no single row can be addressed for editing.
+-- QA fixtures for the console table editor. Not used by the application.
+-- Four primary-key shapes; app_users / items / email_logs already cover the
+-- fourth (a key called "id").
+
+-- Single-column key that is not named "id".
+create table if not exists order_items_legacy (
+  sku   text primary key,
+  label text
+);
+
+-- An earlier revision created order_items keyed (order_id, sku) — the same
+-- order the columns are declared in, which is the case that does NOT exercise
+-- key ordering. Drop that version once so the corrected shape below applies.
+-- Keyed off the absence of "qty", which only the old shape lacks, so this is a
+-- no-op on every later deploy and rows added through the console survive.
+do $$
+begin
+  if to_regclass('public.order_items') is not null
+     and not exists (
+       select 1 from information_schema.columns
+        where table_name = 'order_items' and column_name = 'qty'
+     )
+  then
+    drop table order_items;
+  end if;
+end $$;
+
+-- Composite key whose column order deliberately differs from the declaration
+-- order: sku is declared second but is the first key column. An editor that
+-- assumes key order follows column order will address rows wrongly.
 create table if not exists order_items (
   order_id int,
   sku      text,
-  primary key (order_id, sku)
+  qty      int,
+  primary key (sku, order_id)
 );
 
+-- No primary key at all, so no single row can be addressed.
 create table if not exists notes (
   body text
 );
+alter table notes add column if not exists "at" timestamptz default now();
 `;
 
 /**
