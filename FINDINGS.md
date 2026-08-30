@@ -4,9 +4,10 @@ Results from deploying this harness to Roar AI Cloud and exercising the database
 and email services from inside a running app container.
 
 - **App:** `simple-app-roar-ai`
-- **URL:** https://simple-app-roar-ai-fd47.roarai.app
-- **Date:** 2026-08-13
-- **Runtime observed:** Node v22.23.2, `APP_ENVIRONMENT=production`
+- **URL:** https://simple-app-roar-ai-65c0.roarai.app (was `-fd47` before the app
+  was recreated; the old hostname went NXDOMAIN)
+- **Date:** 2026-08-13, updated 2026-08-30
+- **Runtime observed:** Node v24.19.0 (was v22.23.2), `APP_ENVIRONMENT=production`
 
 ## Summary
 
@@ -14,15 +15,28 @@ and email services from inside a running app container.
 |-----------|--------|
 | GitHub deploy, build, auto-redeploy on push | Working |
 | Environment variable injection | Working |
-| Email sending | Working |
+| Email sending | Worked, then stopped after recreation — see F7 |
 | AI gateway credentials injected | Present (not exercised) |
-| **Managed Postgres** | **Unreachable from the app container** |
+| Managed Postgres reachability | Resolved — see F1 |
+| **Managed Postgres TLS** | **Not supported at all — see F6** |
+| **Email after app recreation** | **Credentials no longer injected — see F7** |
 
 ---
 
-## F1 — Managed Postgres is unreachable from app containers
+## F1 — Managed Postgres was unreachable from app containers
 
-**Severity: blocking.** No app that uses the database can function.
+**Status: RESOLVED** as of the app being recreated (new URL suffix `-65c0`,
+runtime moved from Node v22.23.2 to v24.19.0). The database now connects:
+
+```json
+"database": { "ok": true, "foundAs": "DATABASE_URL", "port": "6432", "ssl": false }
+```
+
+Whether the routing was fixed or recreation simply placed the app on the right
+network is not visible from here. Original report follows, since the diagnostic
+path is worth keeping and F3 remains unaddressed.
+
+**Severity when open: blocking.** No app that used the database could function.
 
 `DATABASE_URL` is injected and well-formed, but no connection can be
 established. Measured from inside the app container:
@@ -203,6 +217,57 @@ The platform offers database and email toggles but no auth. Apps needing
 accounts must implement their own — this harness does, with scrypt password
 hashing and hashed session tokens in Postgres. Fine, but worth stating in the
 docs so it is not a surprise mid-build.
+
+---
+
+## F6 — Managed Postgres does not support TLS
+
+**Severity: high.** Both a compatibility trap and a security concern.
+
+The database refuses TLS outright, and the injected `DATABASE_URL` does not say
+so. Measured across two attempts:
+
+```json
+"attempts": [
+  { "ssl": true,  "ok": false, "ms": 9,   "error": "The server does not support SSL connections" },
+  { "ssl": false, "ok": true,  "ms": 134 }
+]
+```
+
+Two separate problems:
+
+1. **Clients that attempt TLS fail.** This harness only connects because it
+   retries without TLS after an explicit refusal. A stock client, or an ORM
+   configured for a managed database, will attempt SSL, get refused, and stop.
+   Nothing in the connection string signals this — appending `?sslmode=disable`
+   to the injected URL would at least make the behaviour explicit and let
+   standard clients configure themselves correctly.
+
+2. **Application-to-database traffic is unencrypted.** Credentials and row data
+   cross the network in plaintext. Acceptable only if that path is fully trusted
+   and isolated; worth stating explicitly in the docs either way, since users
+   handling personal or regulated data need to know before they build on it.
+
+---
+
+## F7 — Email credentials are not injected after an app is recreated
+
+**Severity: high.** Silent loss of a working capability.
+
+The app previously had email working via an injected `RESEND_API_KEY`. After
+recreation, both that and `EMAIL_FROM` are absent:
+
+```json
+"email": { "configured": false, "transport": null, "variables": {}, "otherMailVariablesPresent": [] }
+```
+
+The app falls back to a default sender and cannot send at all. Whether the email
+toggle defaulted off during recreation or injection failed is not visible from
+inside the container.
+
+Worth checking whether recreating an app preserves its service toggles. If it
+does not, that is a data-loss-shaped surprise: the app deploys successfully,
+reports healthy, and silently cannot send mail until someone tests it.
 
 ---
 
