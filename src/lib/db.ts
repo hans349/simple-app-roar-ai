@@ -191,6 +191,19 @@ create table if not exists email_logs (
 create index if not exists items_user_created_idx on items (user_id, created_at desc);
 create index if not exists email_logs_user_created_idx on email_logs (user_id, created_at desc);
 create index if not exists sessions_expires_idx on sessions (expires_at);
+
+-- QA fixtures for b205adf7 — exercise how the console handles primary keys.
+-- Not used by the application. order_items is keyed on two columns; notes is
+-- deliberately unkeyed, so no single row can be addressed for editing.
+create table if not exists order_items (
+  order_id int,
+  sku      text,
+  primary key (order_id, sku)
+);
+
+create table if not exists notes (
+  body text
+);
 `;
 
 /**
